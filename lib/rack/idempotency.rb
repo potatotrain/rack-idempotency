@@ -35,7 +35,7 @@ module Rack
 
       storage.write(response) if response.success?
 
-      response.to_a
+      [response.status, response.headers, response.body]
     end
   end
 end
