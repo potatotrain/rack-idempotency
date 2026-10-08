@@ -1,5 +1,3 @@
-require "rack/utils"
-
 module Rack
   class Idempotency
     class Response
@@ -7,7 +5,7 @@ module Rack
 
       def initialize(status, headers, body)
         @status  = status.to_i
-        @headers = Rack::Utils::HeaderHash.new(headers)
+        @headers = headers
         @body    = body
       end
 
