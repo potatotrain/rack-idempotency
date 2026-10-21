@@ -32,7 +32,6 @@ module Rack
 
         form = get_header("rack.request.form_vars")
         return form if form && content_length && content_length.to_i == form.bytesize
-        return if form || get_header("rack.request.form_hash") || get_header("rack.request.form_pairs")
 
         raw_body = body.read
         set_header("rack.input", StringIO.new(raw_body))

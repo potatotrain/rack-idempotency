@@ -151,6 +151,26 @@ RSpec.describe Rack::Idempotency do
     end
   end
 
+  context "after upstream checked a JSON request for form parameters" do
+    let(:middleware) do
+      idempotency = super()
+      Rack::Lint.new(lambda do |env|
+        Rack::Request.new(env).POST
+        idempotency.call(env)
+      end)
+    end
+    let(:headers) { super().merge("CONTENT_TYPE" => "application/json") }
+    let(:body) { '{"password":"first-password"}' }
+
+    it "recovers the intact body despite empty form caches and preserves retries" do
+      original = send_request
+      replay = send_request
+
+      expect(replay.body).to eq(original.body)
+      expect(received_bodies).to eq([body])
+    end
+  end
+
   it "handles a request without rack.input" do
     original = send_request(input: nil)
     replay = send_request(input: nil)
