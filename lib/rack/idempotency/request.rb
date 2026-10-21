@@ -1,6 +1,5 @@
 require "rack/request"
 require "digest/sha2"
-require "stringio"
 
 module Rack
   class Idempotency    
@@ -16,33 +15,13 @@ module Rack
       end
 
       def fingerprint
-        raw_body = request_body
-        return unless raw_body
+        return if [path, path_info].any? { |value| value.squeeze("/").start_with?("/oauth/") }
 
-        fields = [idempotency_key, request_method, fullpath, *SCOPE_HEADERS.map { |header| get_header(header) }, raw_body]
-        Digest::SHA256.hexdigest(fields.map { |field| Digest::SHA256.hexdigest(field.to_s) }.join)
-      end
+        credentials = SCOPE_HEADERS.map { |header| get_header(header).to_s }
+        return if credentials.all?(&:empty?)
 
-      private
-
-      def request_body
-        return get_header("RAW_POST_DATA") if get_header("RAW_POST_DATA")
-        return "" unless body
-        return read_rewindable_body if body.respond_to?(:rewind)
-
-        form = get_header("rack.request.form_vars")
-        return form if form && content_length && content_length.to_i == form.bytesize
-
-        raw_body = body.read
-        set_header("rack.input", StringIO.new(raw_body))
-        raw_body if content_length && content_length.to_i == raw_body.bytesize
-      end
-
-      def read_rewindable_body
-        body.rewind
-        body.read
-      ensure
-        body.rewind
+        fields = [idempotency_key, request_method, fullpath, *credentials]
+        Digest::SHA256.hexdigest(fields.map { |field| Digest::SHA256.hexdigest(field) }.join)
       end
     end
   end

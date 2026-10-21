@@ -4,7 +4,7 @@ module Rack
       def initialize(store, request)
         @store   = store
         fingerprint = request.fingerprint if request.idempotency_key
-        @storage_key = "rack:idempotency:v2:#{fingerprint}" if fingerprint
+        @storage_key = "rack:idempotency:v3:#{fingerprint}" if fingerprint
       end
 
       def read

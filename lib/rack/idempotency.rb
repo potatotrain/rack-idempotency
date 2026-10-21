@@ -12,9 +12,9 @@ require "rack/idempotency/response"
 module Rack
   # Rack middleware for ensuring mutating endpoints are called at most once.
   #
-  # Any request with an `Idempotency-Key` header will store its response in
-  # the given cache.  When the client retries, it will get the previously
-  # cached response.
+  # Requests with an `Idempotency-Key` and Authorization or Cookie header
+  # outside /oauth/ store successful responses in the given cache. Retries
+  # with the same key, method, full path and credentials replay that response.
   class Idempotency
     def initialize(app, store: NullStore.new)
       @app     = app
@@ -22,7 +22,7 @@ module Rack
     end
 
     def call(env)
-      request = Request.new(env)
+      request = Request.new(env.dup.freeze)
       storage = RequestStorage.new(@store, request)
 
       storage.read || store_response(storage, env)

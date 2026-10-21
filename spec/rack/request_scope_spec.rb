@@ -1,13 +1,12 @@
 require "spec_helper"
 require "rack/lint"
-require "rack/method_override"
 
 RSpec.describe Rack::Idempotency do
   let(:store) { Rack::Idempotency::MemoryStore.new }
-  let(:received_bodies) { [] }
+  let(:received_inputs) { [] }
   let(:app) do
     lambda do |env|
-      received_bodies << env["rack.input"]&.read
+      received_inputs << env["rack.input"]
       [status, { "content-type" => "text/plain", "set-cookie" => "session=response-cookie" }, [SecureRandom.uuid]]
     end
   end
@@ -22,9 +21,8 @@ RSpec.describe Rack::Idempotency do
       "HTTP_COOKIE" => "session=first-session; auth=first-auth"
     }
   end
-  let(:body) { "grant_type=password&username=first&password=first-password" }
 
-  def send_request(method: "POST", path: "/oauth/token?source=mobile", input: body, **overrides)
+  def send_request(method: "POST", path: "/api/v1/chat_messages?source=mobile", input: "message=hello", **overrides)
     request.request(method, path, headers.merge(overrides).merge(input: input))
   end
 
@@ -39,31 +37,15 @@ RSpec.describe Rack::Idempotency do
     "no cookies" => { "HTTP_COOKIE" => nil },
     "another method" => { method: "PUT" },
     "another path" => { path: "/api/v1/users?source=mobile" },
-    "another query string" => { path: "/oauth/token?source=web" },
-    "another mount path" => { "SCRIPT_NAME" => "/mounted" },
-    "another body" => { input: "grant_type=password&username=second&password=second-password" }
+    "another query string" => { path: "/api/v1/chat_messages?source=web" },
+    "another mount path" => { "SCRIPT_NAME" => "/mounted" }
   }.each do |description, changes|
     it "does not replay the same key for #{description}" do
       original = send_request
       different = send_request(**changes)
 
       expect(different.body).not_to eq(original.body)
-      expect(received_bodies.size).to eq(2)
-    end
-  end
-
-  ["Basic shared-community-credentials", nil].each do |authorization|
-    context "with #{authorization ? 'shared Basic credentials' : 'client credentials in the body'}" do
-      let(:headers) { super().merge("HTTP_AUTHORIZATION" => authorization, "HTTP_COOKIE" => nil) }
-      let(:body) { "client_id=shared&client_secret=shared&grant_type=password&username=first&password=first-password" }
-
-      it "does not replay another user's password grant" do
-        original = send_request
-        different = send_request(input: body.sub("first-password", "second-password"))
-
-        expect(different.body).not_to eq(original.body)
-        expect(received_bodies.size).to eq(2)
-      end
+      expect(received_inputs.size).to eq(2)
     end
   end
 
@@ -78,32 +60,82 @@ RSpec.describe Rack::Idempotency do
         expect(replay.status).to eq(original.status)
         expect(replay.headers).to eq(original.headers)
         expect(replay.body).to eq(original.body)
-        expect(received_bodies).to eq([body])
+        expect(received_inputs.size).to eq(1)
       end
     end
   end
 
-  it "hashes the entire body even when upstream middleware has read it" do
-    first_input = StringIO.new(body)
-    second_input = StringIO.new(body.sub("first-password", "second-password"))
-    first_input.read
-    second_input.read
+  %w[HTTP_AUTHORIZATION X-HTTP_AUTHORIZATION X_HTTP_AUTHORIZATION REDIRECT_X_HTTP_AUTHORIZATION HTTP_COOKIE].each do |header|
+    it "replays when #{header} is the only credential header" do
+      headers.clear
+      headers.merge!("HTTP_IDEMPOTENCY_KEY" => key, header => "first-credential")
+      original = send_request
 
-    original = send_request(input: first_input)
-    different = send_request(input: second_input)
-
-    expect(different.body).not_to eq(original.body)
-    expect(received_bodies).to eq([body, body.sub("first-password", "second-password")])
+      expect(send_request.body).to eq(original.body)
+      expect(send_request(header => "second-credential").body).not_to eq(original.body)
+      expect(received_inputs.size).to eq(2)
+    end
   end
 
-  it "handles binary request bodies without decoding them" do
-    original = send_request(input: "\xFF\x00".b)
-    replay = send_request(input: "\xFF\x00".b)
-    different = send_request(input: "\xFE\x00".b)
+  [nil, ""].each do |credential|
+    it "does not cache requests with #{credential.nil? ? 'missing' : 'empty'} credentials" do
+      headers.merge!("HTTP_AUTHORIZATION" => credential, "HTTP_COOKIE" => credential)
+      expect(store).not_to receive(:read)
+      expect(store).not_to receive(:write)
 
-    expect(replay.body).to eq(original.body)
-    expect(different.body).not_to eq(original.body)
-    expect(received_bodies).to eq(["\xFF\x00".b, "\xFE\x00".b])
+      original = send_request
+      expect(send_request.body).not_to eq(original.body)
+      expect(received_inputs.size).to eq(2)
+    end
+  end
+
+  ["/oauth/token", "/oauth/token.json", "/oauth/authorize?source=mobile", "/oauth/revoke", "//oauth/token", "///oauth/token"].each do |path|
+    it "never caches #{path}, including when the app is mounted" do
+      expect(store).not_to receive(:read)
+      expect(store).not_to receive(:write)
+
+      ["", "/mounted"].each do |mount|
+        overrides = { "SCRIPT_NAME" => mount, "PATH_INFO" => path.split("?").first }
+        original = send_request(path: path, **overrides)
+        expect(send_request(path: path, **overrides).body).not_to eq(original.body)
+      end
+      expect(received_inputs.size).to eq(4)
+    end
+  end
+
+  it "replays a multipart retry whose boundary changed" do
+    responses = %w[first-boundary second-boundary].map do |boundary|
+      body = "--#{boundary}\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\nhello\r\n--#{boundary}--\r\n"
+      send_request(input: body, "CONTENT_TYPE" => "multipart/form-data; boundary=#{boundary}")
+    end
+
+    expect(responses.last.body).to eq(responses.first.body)
+    expect(received_inputs.size).to eq(1)
+    expect(received_inputs.first.read).to include("hello")
+  end
+
+  it "does not cache an app mounted at /oauth" do
+    expect(store).not_to receive(:read)
+    expect(store).not_to receive(:write)
+
+    original = send_request(path: "/token", "SCRIPT_NAME" => "/oauth")
+    expect(send_request(path: "/token", "SCRIPT_NAME" => "/oauth").body).not_to eq(original.body)
+  end
+
+  [true, false].each do |rewindable|
+    it "never reads or rewinds a large #{rewindable ? 'rewindable' : 'non-rewindable'} input" do
+      input = double("large input")
+      allow(input).to receive(:rewind) if rewindable
+      expect(input).not_to receive(:read)
+      expect(input).not_to receive(:rewind)
+      allow(input).to receive(:respond_to?).with(:rewind).and_return(rewindable)
+      env = Rack::MockRequest.env_for("/api/v1/chat_messages", method: "POST").merge(headers)
+      env.merge!("rack.input" => input, "CONTENT_LENGTH" => "314572800", "CONTENT_TYPE" => "application/octet-stream")
+
+      original = middleware.call(env)
+      expect(middleware.call(env.dup)).to eq(original)
+      expect(received_inputs).to eq([input])
+    end
   end
 
   it "does not conflate header boundaries" do
@@ -113,41 +145,13 @@ RSpec.describe Rack::Idempotency do
     expect(different.body).not_to eq(original.body)
   end
 
-  it "preserves non-rewindable request bodies while separating different bodies" do
-    first_input = double("non-rewindable input", size: body.bytesize)
-    second_input = double("non-rewindable input", size: "another body".bytesize)
-    expect(first_input).to receive(:read).once.and_return(body)
-    expect(second_input).to receive(:read).once.and_return("another body")
+  %w[HTTP_AUTHORIZATION HTTP_COOKIE].each do |header|
+    it "scopes #{header} by its bytes without requiring UTF-8" do
+      original = send_request(header => "first-\xFF".b)
 
-    original = send_request(input: first_input)
-    different = send_request(input: second_input)
-    replay = send_request
-
-    expect(different.body).not_to eq(original.body)
-    expect(replay.body).to eq(original.body)
-    expect(received_bodies).to eq([body, "another body"])
-  end
-
-  context "after Rack has parsed a non-rewindable form" do
-    let(:middleware) { Rack::Lint.new(Rack::MethodOverride.new(super())) }
-    let(:headers) { super().merge("CONTENT_TYPE" => "application/x-www-form-urlencoded") }
-
-    it "uses the complete form bytes to separate password grants and preserve retries" do
-      original = send_request
-      different = send_request(input: body.sub("first-password", "second-password"))
-      replay = send_request
-
-      expect(different.body).not_to eq(original.body)
-      expect(replay.body).to eq(original.body)
-      expect(received_bodies.size).to eq(2)
-    end
-
-    it "does not cache when the original body cannot be recovered exactly" do
-      input = body + "\0"
-      send_request(input: input)
-      send_request(input: input)
-
-      expect(received_bodies.size).to eq(2)
+      expect(send_request(header => "first-\xFF".b).body).to eq(original.body)
+      expect(send_request(header => "second-\xFE".b).body).not_to eq(original.body)
+      expect(received_inputs.size).to eq(2)
     end
   end
 
@@ -159,47 +163,24 @@ RSpec.describe Rack::Idempotency do
         idempotency.call(env)
       end)
     end
-    let(:headers) { super().merge("CONTENT_TYPE" => "application/json") }
-    let(:body) { '{"password":"first-password"}' }
 
-    it "recovers the intact body despite empty form caches and preserves retries" do
-      original = send_request
-      replay = send_request
+    it "preserves replay through Rack::Lint without changing the downstream body" do
+      original = send_request(input: '{"message":"hello"}', "CONTENT_TYPE" => "application/json")
+      replay = send_request(input: '{"message":"hello"}', "CONTENT_TYPE" => "application/json")
 
       expect(replay.body).to eq(original.body)
-      expect(received_bodies).to eq([body])
+      expect(received_inputs.size).to eq(1)
+      expect(received_inputs.first.read).to eq('{"message":"hello"}')
     end
   end
 
-  it "handles a request without rack.input" do
-    original = send_request(input: nil)
-    replay = send_request(input: nil)
-
-    expect(replay.body).to eq(original.body)
-    expect(received_bodies).to eq([nil])
-  end
-
-  it "leaves bodies untouched when there is no idempotency key" do
-    input = double("non-rewindable input")
-    expect(input).to receive(:read).once.and_return(body)
-
-    send_request(input: input, "HTTP_IDEMPOTENCY_KEY" => nil)
-
-    expect(received_bodies).to eq([body])
-  end
-
-  it "does not put credentials or raw body contents in cache keys" do
-    expect(store).to receive(:write).with(satisfy { |cache_key|
-      ["first-token", "first-session", "first-auth", "first-password"].none? { |secret| cache_key.include?(secret) }
-    }, anything).and_call_original
-
-    send_request
-  end
-
-  it "does not read cached responses stored under an unscoped key" do
-    store.write("rack:idempotency:#{key}", [200, { "set-cookie" => "session=other-caller" }, ["other-caller"]].to_json)
+  it "uses a new opaque namespace instead of previous unsafe cache entries" do
+    old_response = [200, {}, ["other-caller"]].to_json
+    allow(store).to receive(:read).and_return(old_response)
+    expect(store).to receive(:read).with(match(/\Arack:idempotency:v3:[0-9a-f]{64}\z/)).and_return(nil)
+    expect(store).to receive(:write).with(match(/\Arack:idempotency:v3:[0-9a-f]{64}\z/), anything).and_call_original
 
     expect(send_request.body).not_to eq("other-caller")
-    expect(received_bodies).to eq([body])
+    expect(received_inputs.size).to eq(1)
   end
 end
