@@ -3,7 +3,7 @@ require "spec_helper"
 RSpec.describe Rack::Idempotency do
   let(:app) { lambda { |_| [200, { "Content-Type" => "text/plain" }, [SecureRandom.uuid]] } }
   let(:middleware) { Rack::Idempotency.new(app, store: Rack::Idempotency::MemoryStore.new) }
-  let(:request) { Rack::MockRequest.new(middleware) }
+  let(:request) { Rack::MockRequest.new(lambda { |env| middleware.call(env.merge("HTTP_AUTHORIZATION" => "Bearer test-token")) }) }
   let(:key) { SecureRandom.uuid }
 
   it "has a version number" do
