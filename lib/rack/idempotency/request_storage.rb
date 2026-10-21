@@ -3,30 +3,27 @@ module Rack
     class RequestStorage
       def initialize(store, request)
         @store   = store
-        @request = request
+        fingerprint = request.fingerprint if request.idempotency_key
+        @storage_key = "rack:idempotency:v2:#{fingerprint}" if fingerprint
       end
 
       def read
-        return unless request.idempotency_key
+        return unless storage_key
 
         stored = store.read(storage_key)
         JSON.parse(stored) if stored
       end
 
       def write(response)
-        return unless request.idempotency_key
+        return unless storage_key
 
         store.write(storage_key, response.to_json)
       end
 
       private
 
-      attr_reader :request
       attr_reader :store
-
-      def storage_key
-        "rack:idempotency:" + request.idempotency_key
-      end
+      attr_reader :storage_key
     end
   end
 end

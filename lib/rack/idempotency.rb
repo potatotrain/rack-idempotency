@@ -22,7 +22,7 @@ module Rack
     end
 
     def call(env)
-      request = Request.new(env.dup.freeze)
+      request = Request.new(env)
       storage = RequestStorage.new(@store, request)
 
       storage.read || store_response(storage, env)
