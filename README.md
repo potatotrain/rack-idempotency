@@ -50,6 +50,22 @@ end
 
 Rack::Idempotency works with any client that sets an `Idempotency-Key` header.  If the request succeeds, any subsequent request with the same key will return a cached response.
 
+## Scoping Retries
+
+By default the `Idempotency-Key` alone selects the cached response, so a request from anyone who reuses a key gets the response stored for it. Pass a `fingerprint` callable to narrow that:
+
+```ruby
+# Replay only to retries with the same Authorization header, and skip the store without one.
+fingerprint = lambda do |request|
+  authorization = request.get_header("HTTP_AUTHORIZATION").to_s
+  authorization unless authorization.empty?
+end
+
+use Rack::Idempotency, store: store, fingerprint: fingerprint
+```
+
+It is called once for each request that carries a key, with a `Rack::Request` over a frozen copy of the env. Build it from headers and the URL (`get_header`, `request_method`, `fullpath`): helpers that cache into the env, such as `params` and `cookies`, raise `FrozenError`, and reading the body would consume it before the app does. Return a string to replay the cached response only to retries with the same fingerprint; the store key holds its SHA-256 digest, never the string itself. Return `nil` to pass the request through without reading or writing the store.
+
 ## Considerations
 
 Rack::Idempotency should handle the following cases:
